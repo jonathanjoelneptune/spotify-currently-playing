@@ -3,9 +3,246 @@
 <head>
   <meta charset="UTF-8" />
   <title>Spotify Currently Playing</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      padding: 2rem;
+      background: #121212;
+      color: #fff;
+    }
+    button {
+      padding: 0.5rem 1rem;
+      border-radius: 999px;
+      border: none;
+      cursor: pointer;
+      font-size: 1rem;
+      background: #1db954;
+      color: #fff;
+      margin-bottom: 1rem;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    #status {
+      margin-bottom: 1rem;
+      font-size: 0.9rem;
+      opacity: 0.8;
+    }
+    .card {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      background: #181818;
+      padding: 1rem;
+      border-radius: 12px;
+      max-width: 480px;
+    }
+    #album-art {
+      width: 120px;
+      height: 120px;
+      object-fit: cover;
+      border-radius: 8px;
+      background: #000;
+    }
+    #track-info h2 {
+      margin: 0;
+      font-size: 1.2rem;
+    }
+    #track-info p {
+      margin: 0.25rem 0 0 0;
+      font-size: 0.95rem;
+      opacity: 0.8;
+    }
+  </style>
 </head>
 <body>
   <h1>Spotify Currently Playing</h1>
-  <p>If you see this, the page is working.</p>
+
+  <div id="status">Not authenticated yet.</div>
+
+  <button id="login-btn">Connect Spotify</button>
+  <button id="refresh-btn" disabled>What is playing?</button>
+
+  <div class="card" style="margin-top: 1rem;">
+    <img id="album-art" alt="Album art" />
+    <div id="track-info">
+      <h2 id="track-name">No track</h2>
+      <p id="artist-name">No artist</p>
+    </div>
+  </div>
+
+  <script>
+    // 1. Configure these
+    const clientId = "37da51db24384ad3a07c222f71b1525e"; // <- put your Spotify client id here
+    const redirectUri = "https://jonathanjoelneptune.github.io/spotify-currently-playing/"; // <- your GitHub Pages URL
+
+    const scopes = [
+      "user-read-currently-playing",
+      "user-read-playback-state"
+    ];
+
+    const loginBtn = document.getElementById("login-btn");
+    const refreshBtn = document.getElementById("refresh-btn");
+    const statusEl = document.getElementById("status");
+    const trackNameEl = document.getElementById("track-name");
+    const artistNameEl = document.getElementById("artist-name");
+    const albumArtEl = document.getElementById("album-art");
+
+    // Build the authorize URL for Implicit Grant
+    function buildAuthUrl() {
+      const authEndpoint = "https://accounts.spotify.com/authorize";
+      const params = new URLSearchParams({
+        client_id: clientId,
+        response_type: "token",
+        redirect_uri: redirectUri,
+        scope: scopes.join(" ")
+      });
+      return authEndpoint + "?" + params.toString();
+    }
+
+    function loginWithSpotify() {
+      window.location.href = buildAuthUrl();
+    }
+
+    function saveToken(accessToken, expiresIn) {
+      const expiryTime = Date.now() + Number(expiresIn) * 1000;
+      localStorage.setItem("spotify_access_token", accessToken);
+      localStorage.setItem("spotify_token_expiry", expiryTime.toString());
+    }
+
+    function getStoredToken() {
+      const token = localStorage.getItem("spotify_access_token");
+      const expiry = localStorage.getItem("spotify_token_expiry");
+      if (!token || !expiry) return null;
+      if (Date.now() > Number(expiry)) {
+        localStorage.removeItem("spotify_access_token");
+        localStorage.removeItem("spotify_token_expiry");
+        return null;
+      }
+      return token;
+    }
+
+    // Parse token from URL hash after Spotify redirect
+    function handleRedirectHash() {
+      if (!window.location.hash) return;
+
+      const hash = window.location.hash.substring(1);
+      const params = new URLSearchParams(hash);
+      const accessToken = params.get("access_token");
+      const expiresIn = params.get("expires_in");
+      const error = params.get("error");
+
+      if (error) {
+        statusEl.textContent = "Error from Spotify: " + error;
+        window.location.hash = "";
+        return;
+      }
+
+      if (accessToken) {
+        saveToken(accessToken, expiresIn || "3600");
+        statusEl.textContent = "Authenticated with Spotify.";
+        refreshBtn.disabled = false;
+      }
+
+      window.location.hash = "";
+    }
+
+    async function getCurrentlyPlaying() {
+      const token = getStoredToken();
+      if (!token) {
+        statusEl.textContent = "Token missing or expired. Please connect again.";
+        refreshBtn.disabled = true;
+        return;
+      }
+
+      statusEl.textContent = "Checking current track...";
+      refreshBtn.disabled = true;
+
+      try {
+        const res = await fetch("https://api.spotify.com/v1/me/player/currently-playing", {
+          headers: {
+            Authorization: "Bearer " + token
+          }
+        });
+
+        if (res.status === 204) {
+          statusEl.textContent = "Nothing is currently playing.";
+          trackNameEl.textContent = "No track";
+          artistNameEl.textContent = "No artist";
+          albumArtEl.src = "";
+          refreshBtn.disabled = false;
+          return;
+        }
+
+        if (res.status === 401) {
+          statusEl.textContent = "Unauthorized. Token likely expired. Please connect again.";
+          localStorage.removeItem("spotify_access_token");
+          localStorage.removeItem("spotify_token_expiry");
+          refreshBtn.disabled = true;
+          return;
+        }
+
+        if (!res.ok) {
+          const text = await res.text();
+          statusEl.textContent = "Error from Spotify: " + res.status + " " + text;
+          refreshBtn.disabled = false;
+          return;
+        }
+
+        const data = await res.json();
+        const track = data.item;
+
+        if (!track) {
+          statusEl.textContent = "No track info returned.";
+          trackNameEl.textContent = "No track";
+          artistNameEl.textContent = "No artist";
+          albumArtEl.src = "";
+          refreshBtn.disabled = false;
+          return;
+        }
+
+        const trackName = track.name || "Unknown track";
+        const artistNames = (track.artists || []).map(a => a.name).join(", ") || "Unknown artist";
+        const albumImage = (track.album && track.album.images && track.album.images[0])
+          ? track.album.images[0].url
+          : "";
+
+        trackNameEl.textContent = trackName;
+        artistNameEl.textContent = artistNames;
+        if (albumImage) {
+          albumArtEl.src = albumImage;
+        } else {
+          albumArtEl.removeAttribute("src");
+        }
+
+        const isPlaying = data.is_playing ? "playing" : "paused";
+        statusEl.textContent = "Currently " + isPlaying + ".";
+        refreshBtn.disabled = false;
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "Error calling Spotify: " + err.message;
+        refreshBtn.disabled = false;
+      }
+    }
+
+    // Init
+    window.addEventListener("load", () => {
+      handleRedirectHash();
+
+      const token = getStoredToken();
+      if (token) {
+        statusEl.textContent = "Ready. You are authenticated.";
+        refreshBtn.disabled = false;
+      } else {
+        statusEl.textContent = "Not authenticated yet. Click Connect Spotify.";
+        refreshBtn.disabled = true;
+      }
+
+      loginBtn.addEventListener("click", loginWithSpotify);
+      refreshBtn.addEventListener("click", getCurrentlyPlaying);
+    });
+  </script>
 </body>
 </html>
+
